@@ -21,8 +21,10 @@ from typing import Iterable, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
-from keras import activations, initializers
+from keras import activations, initializers, ops
 from keras.layers import Layer
+
+from ._ops import safe_divide
 
 
 TensorLike = Union[torch.Tensor, np.ndarray]
