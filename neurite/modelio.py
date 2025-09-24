@@ -1,8 +1,11 @@
-import tensorflow as tf
-import h5py
-import json
-import inspect
+from __future__ import annotations
+
 import functools
+import inspect
+import json
+
+import h5py
+from keras import Model
 
 
 def store_config_args(func):
@@ -75,7 +78,7 @@ class ReferenceContainer:
         pass
 
 
-class LoadableModel(tf.keras.Model):
+class LoadableModel(Model):
     """
     Base class for easy keras model loading without having to manually
     specify the architecture configuration at load time.

@@ -26,8 +26,7 @@ CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
 
-import tensorflow as tf
-import tensorflow.keras.backend as K
+from keras import ops
 
 from .utils import soft_delta
 
@@ -38,8 +37,10 @@ def soft_l0_wrap(wt=1.):
         """
         maximize the number of 0 weights
         """
-        nb_weights = tf.cast(tf.size(x), tf.float32)
-        nb_zero_wts = tf.reduce_sum(soft_delta(K.flatten(x)))
+        flat = ops.reshape(x, (-1,))
+        nb_weights = ops.sum(ops.ones_like(flat))
+        nb_zero_wts = ops.sum(soft_delta(flat))
+        nb_weights = ops.cast(nb_weights, nb_zero_wts.dtype)
         return wt * (nb_weights - nb_zero_wts) / nb_weights
 
     return soft_l0

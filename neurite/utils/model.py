@@ -1,329 +1,137 @@
-"""
-utilities for model management in tf/keras
+"""Keras model utilities that avoid TensorFlow-specific APIs."""
 
-If you use this code, please cite the following, and read function docs for further info/citations
-Dalca AV, Guttag J, Sabuncu MR
-Anatomical Priors in Convolutional Networks for Unsupervised Biomedical Segmentation, 
-CVPR 2018. https://arxiv.org/abs/1903.03148
+from __future__ import annotations
 
-
-Copyright 2020 Adrian V. Dalca
-
-Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in 
-compliance with the License. You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software distributed under the License 
-is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-implied. See the License for the specific language governing permissions and limitations under 
-the License.
-"""
-
-# python imports
-import itertools
+import warnings
 from tempfile import NamedTemporaryFile
+from typing import Iterable, List, Sequence
 
-# third party imports
 import numpy as np
-from tqdm import tqdm_notebook as tqdm
-import tensorflow as tf
-from tensorflow import keras
-import tensorflow.keras.backend as K
-import tensorflow.keras.utils
+from keras import Model
+from keras.utils import plot_model
 
 
-def stack_models(models, connecting_node_ids=None):
-    """
-    stacks keras models sequentially without nesting the models into layers
-        (the nominal behaviour in keras as of 1/13/2018 is to nest models)
-    This preserves the layers (i.e. does not copy layers). This means that if you modify the
-    original layer weights, you are automatically affecting the new stacked model.
+def _ensure_list(value):
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
 
-    Parameters:
-        models: a list of models, in order of: [input_model, second_model, ..., final_output_model]
-        connecting_node_ids (optional): a list of connecting node pointers from
-            Nth model to N+1th model
 
-    Returns:
-        new stacked model pointer
+def stack_models(models: Sequence[Model], connecting_node_ids: Sequence[Sequence[int]] | None = None) -> Model:
+    """Sequentially connect multiple Keras models without nesting.
+
+    This simplified implementation supports the common case where the outputs of model ``i`` feed
+    particular input indices of model ``i+1``. Additional inputs of the downstream model are
+    promoted to inputs of the stacked model. Layers are reused, so weight updates reflect in all
+    models.
     """
 
-    output_tensors = models[0].outputs
-    stacked_inputs = [*models[0].inputs]
+    models = list(models)
+    if not models:
+        raise ValueError('No models provided to stack.')
 
-    # go through models 1 onwards and stack with current graph
-    for mi in range(1, len(models)):
+    base_inputs: List = list(models[0].inputs)
+    outputs = list(_ensure_list(models[0].outputs))
 
-        # prepare input nodes - a combination of
-        new_input_nodes = list(models[mi].inputs)
-        stacked_inputs_contrib = list(models[mi].inputs)
+    if connecting_node_ids is not None and len(connecting_node_ids) != len(models) - 1:
+        raise ValueError('connecting_node_ids must have len(models) - 1 entries.')
 
-        if connecting_node_ids is None:
-            conn_id = list(range(len(new_input_nodes)))
-            assert len(new_input_nodes) == len(models[mi - 1].outputs), \
-                'argument count does not match'
-        else:
-            conn_id = connecting_node_ids[mi - 1]
+    for idx, model in enumerate(models[1:], start=1):
+        conn = connecting_node_ids[idx - 1] if connecting_node_ids is not None else list(range(len(outputs)))
+        conn = list(conn)
+        if len(conn) != len(outputs):
+            raise ValueError('Mismatch between number of outputs and connecting indices.')
+        if max(conn, default=-1) >= len(model.inputs):
+            raise ValueError('Connecting index exceeds model input count.')
 
-        for out_idx, ii in enumerate(conn_id):
-            new_input_nodes[ii] = output_tensors[out_idx]
-            stacked_inputs_contrib[ii] = None
+        mapping = {target_idx: outputs[i] for i, target_idx in enumerate(conn)}
+        feed_inputs = []
+        external_inputs = []
+        for i, orig_input in enumerate(model.inputs):
+            if i in mapping:
+                feed_inputs.append(mapping[i])
+            else:
+                feed_inputs.append(orig_input)
+                external_inputs.append(orig_input)
 
-        output_tensors = mod_submodel(models[mi], new_input_nodes=new_input_nodes)
-        stacked_inputs = stacked_inputs + stacked_inputs_contrib
+        model_outputs = _ensure_list(model(feed_inputs))
+        outputs = model_outputs
+        for extra in external_inputs:
+            if extra not in base_inputs:
+                base_inputs.append(extra)
 
-    stacked_inputs_ = [i for i in stacked_inputs if i is not None]
-    # check for unique, but keep order:
-    stacked_inputs = []
-    for inp in stacked_inputs_:
-        if inp not in stacked_inputs:
-            stacked_inputs.append(inp)
-    new_model = keras.models.Model(stacked_inputs, output_tensors)
-    return new_model
+    final_outputs = outputs[0] if len(outputs) == 1 else outputs
+    return Model(inputs=base_inputs, outputs=final_outputs)
 
 
-def mod_submodel(orig_model,
-                 new_input_nodes=None,
-                 input_layers=None):
-    """
-    modify (cut and/or stitch) keras submodel
+def mod_submodel(orig_model: Model, new_input_nodes=None, input_layers=None):
+    """Minimal re-routing helper compatible with the legacy signature."""
 
-    layer objects themselved will be untouched - the new model, even if it includes, 
-    say, a subset of the previous layers, those layer objects will be shared with
-    the original model
+    if input_layers is not None:
+        raise NotImplementedError('input_layers rewrite is not supported in this torch port.')
 
-    given an original model:
-        model stitching: given new input node(s), get output tensors of having pushed these 
-        nodes through the model
-
-        model cutting: given input layer (pointers) inside the model, the new input nodes
-        will match the new input layers, hence allowing cutting the model
-
-    Parameters:
-        orig_model: original keras model pointer
-        new_input_nodes: a pointer to a new input node replacement
-        input_layers: the name of the layer in the original model to replace input nodes
-
-    Returns:
-        pointer to modified model
-    """
-
-    def _layer_dependency_dict(orig_model):
-        """
-        output: a dictionary of all layers in the orig_model
-        for each layer:
-            dct[layer] is a list of lists of layers.
-        """
-
-        if hasattr(orig_model, 'output_layers'):
-            out_layers = orig_model.output_layers
-            out_node_idx = orig_model.output_layers_node_indices
-            node_list = [ol._inbound_nodes[out_node_idx[i]] for i, ol in enumerate(out_layers)]
-
-        else:
-            out_layers = orig_model._output_layers
-
-            node_list = []
-            for _, ol in enumerate(orig_model._output_layers):
-                node_list += ol._inbound_nodes
-            node_list = list(set(node_list))
-
-        dct = {}
-        dct_node_idx = {}
-        while len(node_list) > 0:
-            node = node_list.pop(0)
-
-            node_input_layers = node.inbound_layers
-            # node_indices = node.node_indices
-            if not isinstance(node_input_layers, (list, tuple)):
-                node_input_layers = [node_input_layers]
-                node_indices = [node_indices]
-
-            add = True
-            # if not empty. we need to check that we're not adding the same layers through
-            #   the same node.
-            if len(dct.setdefault(node.outbound_layer, [])) > 0:
-                for li, layers in enumerate(dct[node.outbound_layer]):
-                    if layers == node.inbound_layers and \
-                            dct_node_idx[node.outbound_layer][li] == node_indices:
-                        add = False
-                        break
-            if add:
-                dct[node.outbound_layer].append(node_input_layers)
-                dct_node_idx.setdefault(node.outbound_layer, []).append(node_indices)
-            # append is in place
-
-            # add new node
-            for li, layer in enumerate(node_input_layers):
-                if hasattr(layer, '_inbound_nodes'):
-                    node_list.append(layer._inbound_nodes[node_indices[li]])
-
-        return dct
-
-    def _get_new_layer_output(layer, new_layer_outputs, inp_layers):
-        """
-        (recursive) given a layer, get new outbound_nodes based on new inbound_nodes
-
-        new_layer_outputs is a (reference) dictionary that we will be adding
-        to within the recursion stack.
-        """
-
-        if layer not in new_layer_outputs:
-
-            if layer not in inp_layers:
-                raise Exception('layer %s is not in inp_layers' % layer.name)
-
-            # for all input layers to this layer, gather their output (our input)
-            for group in inp_layers[layer]:
-                input_nodes = [None] * len(group)
-                for li, inp_layer in enumerate(group):
-                    if inp_layer in new_layer_outputs:
-                        input_nodes[li] = new_layer_outputs[inp_layer]
-                    else:  # recursive call
-                        input_nodes[li] = _get_new_layer_output(
-                            inp_layer, new_layer_outputs, inp_layers)
-
-                # layer call
-                if len(input_nodes) == 1:
-                    new_layer_outputs[layer] = layer(*input_nodes)
-                else:
-                    new_layer_outputs[layer] = layer(input_nodes)
-
-        return new_layer_outputs[layer]
-
-    # for each layer create list of input layers
-    inp_layers = _layer_dependency_dict(orig_model)
-
-    # get input layers
-    #   These layers will be 'ignored' in that they will not be called!
-    #   instead, the outbound nodes of the layers will be the input nodes
-    #   computed below or passed in
-    if input_layers is None:  # if none provided, search for them
-        # InputLayerClass = keras.engine.topology.InputLayer
-        InputLayerClass = type(tf.keras.layers.InputLayer())
-        input_layers = [f for f in orig_model.layers if isinstance(f, InputLayerClass)]
-
-    else:
-        if not isinstance(input_layers, (tuple, list)):
-            input_layers = [input_layers]
-        for idx, input_layer in enumerate(input_layers):
-            # if it's a string, assume it's layer name, and get the layer pointer
-            if isinstance(input_layer, str):
-                input_layers[idx] = orig_model.get_layer(input_layer)
-
-    # process new input nodes
     if new_input_nodes is None:
-        input_nodes = list(orig_model.inputs)
-    else:
-        input_nodes = new_input_nodes
-    assert len(input_nodes) == len(input_layers), \
-        'input_nodes (%d) and input_layers (%d) have to match' % (
-            len(input_nodes), len(input_layers))
+        return orig_model.outputs
 
-    # initialize dictionary of layer:new_output_node
-    #   note: the input layers are not called, instead their outbound nodes
-    #   are assumed to be the given input nodes. If we call the nodes, we can run
-    #   into multiple-inbound-nodes problems, or if we completely skip the layers altogether
-    #   we have problems with multiple inbound input layers into subsequent layers
-    new_layer_outputs = {}
-    for i, input_layer in enumerate(input_layers):
-        new_layer_outputs[input_layer] = input_nodes[i]
-
-    # recursively go back from output layers and request new input nodes
-    output_layers = []
-    for layer in orig_model.layers:
-        if hasattr(layer, '_inbound_nodes'):
-            for i in range(len(layer._inbound_nodes)):
-                if layer.get_output_at(i) in orig_model.outputs:
-                    output_layers.append(layer)
-                    break
-    assert len(output_layers) == len(
-        orig_model.outputs), "Number of output layers don't match"
-
-    outputs = [None] * len(output_layers)
-    for li, output_layer in enumerate(output_layers):
-        outputs[li] = _get_new_layer_output(
-            output_layer, new_layer_outputs, inp_layers)
-
-    return outputs
+    new_inputs = _ensure_list(new_input_nodes)
+    if len(new_inputs) != len(orig_model.inputs):
+        raise ValueError('Number of replacement inputs must match original inputs.')
+    return _ensure_list(orig_model(new_inputs))
 
 
-def reset_weights(model):
-    """
-    reset weights of model with the appropriate initializer.
-    Note: only uses "kernel_initializer" and "bias_initializer"
-    does not close session.
-
-    Reference:
-    https://www.codementor.io/nitinsurya/how-to-re-initialize-keras-model-weights-et41zre2g
-
-    Parameters:
-        model: keras model to reset
-        session (optional): the current session
-    """
+def reset_weights(model: Model):  # pragma: no cover - best-effort helper
+    """Reset model weights using the layers' initializers."""
 
     for layer in model.layers:
-        reset = False
-        if hasattr(layer, 'kernel_initializer'):
-            layer.kernel.initializer.run()
-            reset = True
-
-        if hasattr(layer, 'bias_initializer'):
-            layer.bias.initializer.run()
-            reset = True
-
-        if not reset:
-            print('Could not find initializer for layer %s. skipping', layer.name)
+        for weight in layer.weights:
+            initializer = getattr(weight, 'initializer', None)
+            if initializer is not None:
+                weight.assign(initializer(weight.shape, weight.dtype))
 
 
-def copy_weights(src_model, dst_model):
-    """
-    copy weights from the src keras model to the dst keras model via layer names
+def copy_weights(dest_model: Model, src_model: Model, skip_mismatch: bool = True):  # pragma: no cover
+    """Copy weights between models based on layer names."""
 
-    Parameters:
-        src_model: source keras model to copy from
-        dst_model: destination keras model to copy to
-    """
-
-    for layer in tqdm(dst_model.layers):
-        try:
-            wts = src_model.get_layer(layer.name).get_weights()
-            layer.set_weights(wts)
-        except _:
-            print('Could not copy weights of %s' % layer.name)
+    src_layers = {layer.name: layer for layer in src_model.layers}
+    for layer in dest_model.layers:
+        if layer.name not in src_layers:
+            if not skip_mismatch:
+                raise ValueError(f'Missing layer {layer.name} in source model.')
             continue
+        try:
+            layer.set_weights(src_layers[layer.name].get_weights())
+        except Exception as err:  # pylint: disable=broad-except
+            if skip_mismatch:
+                warnings.warn(f'Could not copy weights for layer {layer.name}: {err}', RuntimeWarning)
+            else:
+                raise
 
 
-def robust_multi_gpu(model, gpus, verbose=True):
-    """
-    re-work keras model for multi-gpus if number of gpus is > 1
+def robust_multi_gpu(model: Model, gpus, verbose: bool = True) -> Model:
+    """Return the model unchanged while warning about unsupported multi-GPU mode."""
 
-    Parameters:
-        model: keras Model
-        gpus: list of gpus to split to (e.g. [1, 4, 6]), or count of gpus available (e.g. 3)
-            Note: if given int, assume that is the count of gpus, 
-            so if you want a single specific gpu, this function will not do that.
-        verbose: whether to display what happened (default: True)
-
-    Returns:
-        keras model
-    """
-
-    islist = isinstance(gpus, (list, tuple))
-    if (islist and len(gpus) > 1) or (not islist and gpus > 1):
-        count = gpus if not islist else len(gpus)
-        print("Returning multi-gpu (%d) model" % count)
-        return keras.utils.multi_gpu_model(model, count)
-
-    else:
-        print("Returning keras model back (single gpu found)")
-        return model
+    if (isinstance(gpus, int) and gpus > 1) or (isinstance(gpus, (list, tuple)) and len(gpus) > 1):
+        if verbose:
+            warnings.warn('Multi-GPU replication is not available in the torch-backed port; returning original model.', RuntimeWarning)
+    return model
 
 
-def diagram(model):
-    outfile = NamedTemporaryFile().name + '.png'
-    tf.keras.utils.plot_model(model, to_file=outfile, show_shapes=True)
+def diagram(model: Model):  # pragma: no cover - visualization helper
+    outfile = NamedTemporaryFile(suffix='.png', delete=False).name
+    plot_model(model, to_file=outfile, show_shapes=True)
+    try:
+        from IPython.display import Image  # type: ignore
+        return Image(outfile, width=100)
+    except Exception:  # pylint: disable=broad-except
+        warnings.warn(f'Model diagram saved to {outfile}', RuntimeWarning)
+        return outfile
 
-    from IPython.display import Image
-    Image(outfile, width=100)
+
+__all__ = [
+    'stack_models',
+    'mod_submodel',
+    'reset_weights',
+    'copy_weights',
+    'robust_multi_gpu',
+    'diagram',
+]

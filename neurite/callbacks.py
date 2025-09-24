@@ -26,17 +26,17 @@ import time
 import warnings
 
 # third party imports
-from tensorflow import keras
-import tensorflow.keras.backend as K
 import numpy as np
 import matplotlib.pyplot as plt
+from keras import ops
+from keras.callbacks import Callback
 
 # local (our) imports
 import neurite as ne
 from pystrum.pytools import timer
 
 
-class ModelWeightCheck(keras.callbacks.Callback):
+class ModelWeightCheck(Callback):
     """
         check model weights for nan and infinite entries
     """
@@ -90,7 +90,7 @@ class ModelWeightCheck(keras.callbacks.Callback):
             # print("max diff", diff)
 
 
-class CheckLossTrend(keras.callbacks.Callback):
+class CheckLossTrend(Callback):
     """
         check model weights for nan and infinite entries
     """
@@ -147,7 +147,7 @@ class CheckLossTrend(keras.callbacks.Callback):
             self.losses = [*self.losses[1:], logs['loss']]
 
 
-class PlotTestSlices(keras.callbacks.Callback):
+class PlotTestSlices(Callback):
     '''
     plot slices of a test subject from several directions
     '''
@@ -247,7 +247,7 @@ class PlotTestSlices(keras.callbacks.Callback):
             plt.close()
 
 
-class PredictMetrics(keras.callbacks.Callback):
+class PredictMetrics(Callback):
     '''
     Compute metrics, like Dice, and save to CSV/log
 
@@ -346,7 +346,7 @@ class PredictMetrics(keras.callbacks.Callback):
                         logs[varname] = meanmet[idx, midx]
 
 
-class ModelCheckpoint(keras.callbacks.Callback):
+class ModelCheckpoint(Callback):
     """
     A modification of keras' ModelCheckpoint, but allow for saving on_batch_end
     changes include:
@@ -481,7 +481,7 @@ class ModelCheckpoint(keras.callbacks.Callback):
                         self.model.save(filepath, overwrite=True)
 
 
-class ModelCheckpointParallel(keras.callbacks.Callback):
+class ModelCheckpointParallel(Callback):
     """
 
     borrow from: 
@@ -607,7 +607,7 @@ class ModelCheckpointParallel(keras.callbacks.Callback):
                         self.model.layers[-(num_outputs + 1)].save(filepath, overwrite=True)
 
 
-class TimeHistory(keras.callbacks.Callback):
+class TimeHistory(Callback):
     """
     taken from https://stackoverflow.com/questions/43178668/
                 record-the-computation-time-for-each-epoch-in-keras-during-model-fit
@@ -628,22 +628,45 @@ class TimeHistory(keras.callbacks.Callback):
         self.times.append(time.time() - self.epoch_time_start)
 
 
-class LRLog(keras.callbacks.Callback):
+class LRLog(Callback):
     """
     Callback that adds learning rate to Keras logs.
     """
 
     def __init__(self, lr_log_name='lr'):
-        self._supports_tf_logs = True
         self.lr_log_name = lr_log_name
 
     def on_batch_end(self, batch, logs={}):
-        logs[self.lr_log_name] = K.get_value(self.model.optimizer.lr)
+        lr_value = _resolve_learning_rate(self.model.optimizer)
+        if lr_value is not None:
+            logs[self.lr_log_name] = lr_value
 
 
 ##################################################################################################
 # helper functions
 ##################################################################################################
+
+
+def _resolve_learning_rate(optimizer):
+    """Retrieve a numeric learning rate from a Keras optimizer if possible."""
+
+    lr = None
+    for attr in ("learning_rate", "lr"):
+        if hasattr(optimizer, attr):
+            lr = getattr(optimizer, attr)
+            break
+
+    if lr is None:
+        return None
+
+    if isinstance(lr, (int, float)):
+        return float(lr)
+
+    try:
+        lr_tensor = ops.convert_to_tensor(lr)
+        return float(ops.convert_to_numpy(lr_tensor))
+    except Exception:  # pylint: disable=broad-except
+        return None
 
 def _generate_predictions(model, data_generator, batch_size, nb_samples, vol_params):
     # whole volumes
