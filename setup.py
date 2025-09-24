@@ -39,6 +39,8 @@ setuptools.setup(
         'scikit-learn',
         'nibabel',
         'pystrum>=0.2',
-        'tensorflow',
+        'keras>=3.0.0',
+        'torch',
+        'h5py',
     ]
 )

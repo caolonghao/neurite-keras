@@ -25,19 +25,20 @@ maintainers = [
   { name = "Etienne Chollet", email = "etiennepchollet@gmail.com" }
 ]
 dependencies = [
-  "tensorflow",
+  "keras>=3.0.0",
+  "torch",
   "einops",
-  "pystrum",
+  "pystrum>=0.2",
   "nibabel",
   "pytest",
   "tqdm",
   "scikit-learn",
-  "pystrum",
+  "h5py",
 ]
 
 keywords = [
   "python",
-  "tensorflow",
+  "pytorch",
   "medical-imaging",
   "segmentation",
   "medical-image-computing",
