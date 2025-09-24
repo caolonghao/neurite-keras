@@ -41,42 +41,6 @@ import pystrum.pytools.timer as timer
 from .py import dataproc as nrn_proc
 
 
-class Vol(object):
-
-    def __init__(self,
-                 volpath,
-                 ext='.npz',
-                 nb_restart_cycle=None,     # number of files to restart after
-                 name='single_vol',         # name
-                 fixed_vol_size=True,       # assumes each volume is fixed size
-                 ):
-
-        # get filenames at given paths
-        volfiles = _get_file_list(volpath, ext, vol_rand_seed)
-        nb_files = len(volfiles)
-        assert nb_files > 0, "Could not find any files at %s with extension %s" % (volpath, ext)
-
-        # set up restart cycle for volume files --
-        # i.e. after how many volumes do we restart
-        if nb_restart_cycle is None:
-            nb_restart_cycle = nb_files
-
-        # compute subvolume split
-        vol_data = _load_medical_volume(os.path.join(volpath, volfiles[0]), ext)
-        # process volume
-        if data_proc_fn is not None:
-            vol_data = data_proc_fn(vol_data)
-            [f for f in _npz_headers(npz, namelist=['vol_data.npy'])][0][1]
-
-        nb_patches_per_vol = 1
-        if fixed_vol_size and (patch_size is not None) and all(f is not None for f in patch_size):
-            nb_patches_per_vol = np.prod(pl.gridsize(vol_data.shape, patch_size, patch_stride))
-
-        assert nb_restart_cycle <= (nb_files * nb_patches_per_vol), \
-            '%s restart cycle (%s) too big (%s) in %s' % \
-            (name, nb_restart_cycle, nb_files * nb_patches_per_vol, volpath)
-
-
 def vol(volpath,
         ext='.npz',
         batch_size=1,
@@ -121,13 +85,15 @@ def vol(volpath,
     if data_proc_fn is not None:
         vol_data = data_proc_fn(vol_data)
 
+    if isinstance(patch_stride, int):
+        patch_stride = [patch_stride] * (len(patch_size) if patch_size is not None else len(vol_data.shape))
     nb_patches_per_vol = 1
     if patch_size is not None and all(f is not None for f in patch_size):
         if relabel is None and len(patch_size) == (len(vol_data.shape) - 1):
             tmp_patch_size = [f for f in patch_size]
             patch_size = [*patch_size, vol_data.shape[-1]]
-            patch_stride = [f for f in patch_stride]
-            patch_stride = [*patch_stride, vol_data.shape[-1]]
+            patch_stride = list(patch_stride)
+            patch_stride.append(1)
         assert len(vol_data.shape) == len(patch_size), \
             "Vol dims %d are  not equal to patch dims %d" % (len(vol_data.shape), len(patch_size))
         nb_patches_per_vol = np.prod(pl.gridsize(vol_data.shape, patch_size, patch_stride))
@@ -481,7 +447,11 @@ def add_prior(gen,
 
     # get prior
     if prior_type == 'location':
-        prior_vol = nd.volsize2ndgrid(vol_size)
+        if patch_size is None:
+            raise ValueError('`patch_size` must be provided for location-based priors.')
+        if any(p is None for p in patch_size):
+            raise ValueError('`patch_size` entries must be integers for location-based priors.')
+        prior_vol = nd.volsize2ndgrid(patch_size)
         prior_vol = np.transpose(prior_vol, [1, 2, 3, 0])
         prior_vol = np.expand_dims(prior_vol, axis=0)  # reshape for model
 
@@ -513,6 +483,8 @@ def add_prior(gen,
     # prior generator
     if patch_size is None:
         patch_size = prior_vol.shape[0:3]
+    if isinstance(patch_stride, int):
+        patch_stride = [patch_stride] * len(patch_size)
     assert len(patch_size) == len(patch_stride)
     prior_gen = patch(prior_vol, [*patch_size, nb_channels],
                       patch_stride=[*patch_stride, nb_channels],
@@ -725,7 +697,11 @@ def vol_prior_hack(*args,
 
     # get prior
     if prior_type == 'location':
-        prior_vol = nd.volsize2ndgrid(vol_size)
+        if patch_size is None:
+            raise ValueError('`patch_size` must be provided for location-based priors.')
+        if any(p is None for p in patch_size):
+            raise ValueError('`patch_size` entries must be integers for location-based priors.')
+        prior_vol = nd.volsize2ndgrid(patch_size)
         prior_vol = np.transpose(prior_vol, [1, 2, 3, 0])
         prior_vol = np.expand_dims(prior_vol, axis=0)  # reshape for model
 
@@ -758,6 +734,8 @@ def vol_prior_hack(*args,
     # prior generator
     if patch_size is None:
         patch_size = prior_vol.shape[0:3]
+    if isinstance(patch_stride, int):
+        patch_stride = [patch_stride] * len(patch_size)
     assert len(patch_size) == len(patch_stride)
     prior_gen = patch(prior_vol, [*patch_size, nb_channels],
                       patch_stride=[*patch_stride, nb_channels],
