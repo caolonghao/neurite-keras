@@ -41,7 +41,7 @@ class KerasDataset:
                             pad_amt=0,
                             zoom_factor=None,
                             randomize=False,):
-        """ load and process dataset starting with a tensorflow.keras.datasets dataset
+        """ load and process dataset starting with a keras.datasets dataset
 
         Args:
             tv_ratios (tuple, optional): [description]. Defaults to (5 / 6, 1 / 6).
