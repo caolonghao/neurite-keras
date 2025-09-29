@@ -16,7 +16,7 @@ Stages:
 from __future__ import annotations
 
 import math
-from typing import Iterable, Optional, Sequence, Tuple, Union
+from typing import Callable, Iterable, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -25,6 +25,8 @@ from keras import activations, initializers, ops
 from keras.layers import Layer
 
 from ._ops import safe_divide
+from .py import utils as py_utils
+from .utils import augment as augment_utils
 
 
 TensorLike = Union[torch.Tensor, np.ndarray]
@@ -34,6 +36,21 @@ def _ensure_tensor(x: TensorLike, dtype: Optional[torch.dtype] = None) -> torch.
     if isinstance(x, torch.Tensor):
         return x if dtype is None else x.to(dtype)
     return torch.as_tensor(x, dtype=dtype)
+
+
+def _resolve_torch_dtype(dtype: Optional[Union[str, torch.dtype]]) -> torch.dtype:
+    if dtype is None:
+        return torch.float32
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    if isinstance(dtype, str):
+        cand = getattr(torch, dtype, None)
+        if isinstance(cand, torch.dtype):
+            return cand
+        cand = getattr(torch, dtype.lower(), None)
+        if isinstance(cand, torch.dtype):
+            return cand
+    raise ValueError(f'Unsupported dtype specification: {dtype!r}')
 
 
 def _channels_last_to_first(x: torch.Tensor) -> torch.Tensor:
@@ -461,15 +478,101 @@ class RandomClearLabel(Layer):
 
 
 class PerlinNoise(Layer):
-    def __init__(self, shape: Optional[Sequence[int]] = None, **kwargs):
-        self.shape = tuple(shape) if shape is not None else None
+    """Generate Perlin-like noise volumes using the torch-backed utilities."""
+
+    def __init__(
+        self,
+        shape: Optional[Sequence[int]] = None,
+        noise_min: float = 0.01,
+        noise_max: float = 1.0,
+        fwhm_min: Union[float, Sequence[float]] = 4.0,
+        fwhm_max: Union[float, Sequence[float]] = 32.0,
+        isotropic: bool = False,
+        reduce: Callable[[torch.Tensor], torch.Tensor] = torch.std,
+        out_dtype: Optional[Union[str, torch.dtype]] = torch.float32,
+        axes: Optional[Sequence[int]] = None,
+        seed: Optional[int] = None,
+        **kwargs,
+    ):
+        self.shape = tuple(int(s) for s in shape) if shape is not None else None
+        self.noise_min = float(noise_min)
+        self.noise_max = float(noise_max)
+        self.fwhm_min = fwhm_min
+        self.fwhm_max = fwhm_max
+        self.isotropic = bool(isotropic)
+        self.reduce = reduce
+        self.out_dtype = _resolve_torch_dtype(out_dtype)
+        self.axes = axes
+        self.seed = seed
         super().__init__(**kwargs)
 
+    def get_config(self):
+        config = super().get_config().copy()
+        dtype_name = str(self.out_dtype).split('.')[-1]
+        config.update(
+            {
+                'shape': self.shape,
+                'noise_min': self.noise_min,
+                'noise_max': self.noise_max,
+                'fwhm_min': self.fwhm_min,
+                'fwhm_max': self.fwhm_max,
+                'isotropic': self.isotropic,
+                'reduce': self.reduce,
+                'out_dtype': dtype_name,
+                'axes': self.axes,
+                'seed': self.seed,
+            }
+        )
+        return config
+
+    def build(self, input_shape):
+        if len(input_shape) < 2:
+            raise ValueError('PerlinNoise expects at least a batch and feature dimension.')
+        allowed = range(1, len(input_shape))
+        self.axes = tuple(py_utils.normalize_axes(self.axes, input_shape, allowed=allowed, none_means_all=False))
+        self._rng = np.random.default_rng(self.seed)
+        super().build(input_shape)
+
     def call(self, inputs):
+        if isinstance(inputs, (list, tuple)):
+            inputs = inputs[0]
+
         batch = inputs.shape[0]
-        spatial = self.shape or inputs.shape[1:]
-        noise = torch.randn((batch, *spatial), device=inputs.device, dtype=inputs.dtype)
-        return noise
+        if batch is None:
+            batch = int(ops.shape(inputs)[0])
+        batch = int(batch)
+
+        if self.shape is None:
+            inferred = tuple(inputs.shape[1:])
+        else:
+            inferred = self.shape
+
+        if any(dim is None for dim in inferred):
+            raise ValueError('PerlinNoise requires concrete spatial dimensions when using the torch backend.')
+        target_shape = tuple(int(dim) for dim in inferred)
+
+        axes = [ax - 1 for ax in self.axes]
+
+        samples = []
+        for _ in range(batch):
+            sample = augment_utils.draw_perlin_full(
+                target_shape,
+                noise_min=self.noise_min,
+                noise_max=self.noise_max,
+                fwhm_min=self.fwhm_min,
+                fwhm_max=self.fwhm_max,
+                isotropic=self.isotropic,
+                batched=False,
+                featured=True,
+                reduce=self.reduce,
+                dtype=self.out_dtype,
+                axes=axes,
+                seed=int(self._rng.integers(np.iinfo(np.int64).max)),
+            )
+            samples.append(sample)
+
+        noise = torch.stack(samples, dim=0)
+        return noise.to(device=_ensure_tensor(inputs).device, dtype=self.out_dtype)
 
 
 class DrawImage(Layer):
