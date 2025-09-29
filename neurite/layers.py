@@ -597,14 +597,144 @@ class DrawImage(Layer):
 
 
 class DrawAffineParams(Layer):
-    def __init__(self, ndims: int, **kwargs):
-        self.ndims = ndims
+    """Sample affine parameters (shift, rotation, scale, shear) for augmentation."""
+
+    def __init__(
+        self,
+        shift: Optional[Union[float, Sequence[float]]] = None,
+        rot: Optional[Union[float, Sequence[float]]] = None,
+        scale: Optional[Union[float, Sequence[float]]] = None,
+        shear: Optional[Union[float, Sequence[float]]] = None,
+        normal_shift: bool = False,
+        normal_rot: bool = False,
+        normal_scale: bool = False,
+        normal_shear: bool = False,
+        shift_scale: bool = False,
+        ndims: int = 3,
+        concat: bool = True,
+        out_dtype: Optional[Union[str, torch.dtype]] = torch.float32,
+        seeds: Optional[dict] = None,
+        seed: Optional[int] = None,
+        **kwargs,
+    ):
+        if ndims not in (2, 3):
+            raise ValueError('DrawAffineParams currently supports 2D or 3D transforms.')
+        self.shift = shift
+        self.rot = rot
+        self.scale = scale
+        self.shear = shear
+        self.normal_shift = normal_shift
+        self.normal_rot = normal_rot
+        self.normal_scale = normal_scale
+        self.normal_shear = normal_shear
+        self.shift_scale = shift_scale
+        self.ndims = int(ndims)
+        self.concat = concat
+        self.out_dtype = _resolve_torch_dtype(out_dtype)
+        self.seeds = seeds.copy() if seeds is not None else {}
+        self.seed = seed
         super().__init__(**kwargs)
 
+    def get_config(self):
+        config = super().get_config().copy()
+        dtype_name = str(self.out_dtype).split('.')[-1]
+        config.update(
+            {
+                'shift': self.shift,
+                'rot': self.rot,
+                'scale': self.scale,
+                'shear': self.shear,
+                'normal_shift': self.normal_shift,
+                'normal_rot': self.normal_rot,
+                'normal_scale': self.normal_scale,
+                'normal_shear': self.normal_shear,
+                'shift_scale': self.shift_scale,
+                'ndims': self.ndims,
+                'concat': self.concat,
+                'out_dtype': dtype_name,
+                'seeds': self.seeds,
+                'seed': self.seed,
+            }
+        )
+        return config
+
+    def build(self, _):
+        self._base_rng = np.random.default_rng(self.seed)
+        super().build(None)
+
     def call(self, inputs):
+        if isinstance(inputs, (list, tuple)):
+            inputs = inputs[0]
+
+        device = _ensure_tensor(inputs).device
         batch = inputs.shape[0]
-        params = torch.zeros((batch, self.ndims * (self.ndims + 1)), device=inputs.device, dtype=inputs.dtype)
-        return params
+        if batch is None:
+            batch = int(ops.shape(inputs)[0])
+        batch = int(batch)
+
+        group_dims = dict(shift=self.ndims, rot=(1 if self.ndims == 2 else 3), scale=self.ndims, shear=(1 if self.ndims == 2 else 3))
+        ranges = {
+            'shift': self._normalize_range(self.shift, group_dims['shift'], 'shift'),
+            'rot': self._normalize_range(self.rot, group_dims['rot'], 'rot'),
+            'scale': self._normalize_range(self.scale, group_dims['scale'], 'scale'),
+            'shear': self._normalize_range(self.shear, group_dims['shear'], 'shear'),
+        }
+        normals = {
+            'shift': self.normal_shift,
+            'rot': self.normal_rot,
+            'scale': self.normal_scale,
+            'shear': self.normal_shear,
+        }
+        trunc = {'shift': False, 'rot': False, 'scale': True, 'shear': False}
+
+        outputs = {}
+        for key, lims in ranges.items():
+            shape = (batch, lims.size)
+            rng = self._rng_for(key)
+            outputs[key] = self._sample(lims, shape, normals[key], trunc[key], rng)
+
+        if self.shift_scale:
+            outputs['scale'] = outputs['scale'] + 1.0
+
+        tensors = {k: torch.as_tensor(v, device=device, dtype=self.out_dtype) for k, v in outputs.items()}
+        if self.concat:
+            ordered = [tensors['shift'], tensors['rot'], tensors['scale'], tensors['shear']]
+            return torch.cat(ordered, dim=-1)
+        return tensors['shift'], tensors['rot'], tensors['scale'], tensors['shear']
+
+    def _rng_for(self, key: str) -> np.random.Generator:
+        seed = self.seeds.get(key)
+        if seed is not None:
+            return np.random.default_rng(seed)
+        return self._base_rng
+
+    @staticmethod
+    def _normalize_range(value, expected: int, name: str) -> np.ndarray:
+        if value is None:
+            arr = np.zeros(expected, dtype=np.float32)
+        else:
+            arr = np.asarray(value, dtype=np.float32).ravel()
+            if arr.size == 1:
+                arr = np.repeat(arr, expected)
+            if arr.size != expected:
+                raise ValueError(f'{name} expects {expected} values, got {arr.size}')
+        return arr
+
+    @staticmethod
+    def _sample(lims: np.ndarray, shape: Tuple[int, int], normal: bool, truncate: bool, rng: np.random.Generator) -> np.ndarray:
+        if shape[0] == 0:
+            return np.zeros(shape, dtype=np.float32)
+        lims = lims.astype(np.float32)
+        expand = (1,) * (len(shape) - 1) + (lims.size,)
+        lims_view = lims.reshape(expand)
+        if normal:
+            samples = rng.normal(loc=0.0, scale=1.0, size=shape).astype(np.float32) * lims_view
+            if truncate:
+                limit = 2.0 * lims_view
+                samples = np.clip(samples, -limit, limit)
+        else:
+            samples = (rng.uniform(-1.0, 1.0, size=shape).astype(np.float32)) * lims_view
+        return samples
 
 
 class DownUpSample(Layer):
