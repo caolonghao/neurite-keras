@@ -8,7 +8,7 @@ import random
 # third party
 import numpy as np
 import scipy
-import tensorflow.keras.datasets
+from keras import datasets as keras_datasets
 from tqdm import tqdm
 
 # local
@@ -24,13 +24,13 @@ import neurite as ne
 
 class KerasDataset:
 
-    def __init__(self, dataset=tensorflow.keras.datasets.mnist, **kwargs):
+    def __init__(self, dataset=keras_datasets.mnist, **kwargs):
 
         if isinstance(dataset, str):
             if dataset == 'mnist':
-                dataset = tensorflow.keras.datasets.mnist
+                dataset = keras_datasets.mnist
             if dataset == 'fashion-mnist':
-                dataset = tensorflow.keras.datasets.fashion_mnist
+                dataset = keras_datasets.fashion_mnist
 
         self.dataset = dataset
         self._load_keras_dataset(**kwargs)

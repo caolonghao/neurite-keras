@@ -26,8 +26,9 @@ CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
 
-import tensorflow as tf
-import tensorflow.keras.backend as K
+from keras import backend as K
+
+from . import keras_backend as tf
 
 from .utils import soft_delta
 

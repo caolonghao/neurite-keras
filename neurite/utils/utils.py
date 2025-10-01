@@ -26,9 +26,10 @@ import itertools
 # third party imports
 import os
 import numpy as np
-import tensorflow as tf
-from tensorflow import keras
-import tensorflow.keras.backend as K
+import keras
+from keras import backend as K
+
+from .. import keras_backend as tf
 
 # local imports
 import pystrum.pynd.ndutils as nd
@@ -50,19 +51,11 @@ def setup_device(gpuid=None):
         nb_devices = 1
 
     if gpuid is not None and (gpuid != '-1'):
-        device = '/gpu:' + gpuid
+        device = f'/gpu:{gpuid}'
         os.environ['CUDA_VISIBLE_DEVICES'] = gpuid
-
-        # GPU memory configuration differs between TF 1 and 2
-        if hasattr(tf, 'ConfigProto'):
-            config = tf.ConfigProto()
-            config.gpu_options.allow_growth = True
-            config.allow_soft_placement = True
-            tf.keras.backend.set_session(tf.Session(config=config))
-        else:
-            tf.config.set_soft_device_placement(True)
-            for pd in tf.config.list_physical_devices('GPU'):
-                tf.config.experimental.set_memory_growth(pd, True)
+        tf.config.set_soft_device_placement(True)
+        for pd in tf.config.list_physical_devices('GPU'):
+            tf.config.experimental.set_memory_growth(pd, True)
     else:
         device = '/cpu:0'
         os.environ['CUDA_VISIBLE_DEVICES'] = '-1'

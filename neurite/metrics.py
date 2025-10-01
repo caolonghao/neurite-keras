@@ -26,12 +26,12 @@ import warnings
 
 # third party
 import numpy as np
-import tensorflow as tf
-import tensorflow.keras.backend as K
-from tensorflow.keras import losses
-# simple metrics renamed mae -> l1, mse -> l2
-from tensorflow.keras.losses import MAE as l1
-from tensorflow.keras.losses import MSE as l2
+from keras import backend as K
+from keras import losses
+from keras.losses import MAE as l1
+from keras.losses import MSE as l2
+
+from . import keras_backend as tf
 
 # local
 import neurite as ne
@@ -112,7 +112,7 @@ class MutualInformation:
             if self.bin_centers is None:
                 sigma = sigma_ratio / (self.nb_bins - 1)
             else:
-                sigma = sigma_ratio * tf.reduce_mean(tf.experimental.numpy.diff(bin_centers))
+                sigma = sigma_ratio * tf.reduce_mean(bin_centers[1:] - bin_centers[:-1])
             self.soft_bin_alpha = 1 / (2 * tf.square(sigma))
             print(self.soft_bin_alpha)
 
@@ -616,7 +616,7 @@ class HardDice(Dice):
                          normalize=normalize)
 
 
-class CategoricalCrossentropy(tf.keras.losses.CategoricalCrossentropy):
+class CategoricalCrossentropy(losses.CategoricalCrossentropy):
 
     def __init__(self, label_weights=None, **kwargs):
         """
@@ -650,7 +650,7 @@ class CategoricalCrossentropy(tf.keras.losses.CategoricalCrossentropy):
         return super().__call__(y_true, y_pred, sample_weight=sample_weight)
 
 
-class MeanSquaredErrorProb(tf.keras.losses.MeanSquaredError):
+class MeanSquaredErrorProb(losses.MeanSquaredError):
 
     def __init__(self, label_weights=None, **kwargs):
         """

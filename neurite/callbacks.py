@@ -26,8 +26,8 @@ import time
 import warnings
 
 # third party imports
-from tensorflow import keras
-import tensorflow.keras.backend as K
+import keras
+from keras import backend as K
 import numpy as np
 import matplotlib.pyplot as plt
 

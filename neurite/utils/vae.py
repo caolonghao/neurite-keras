@@ -30,12 +30,11 @@ try:
     from sklearn.decomposition import PCA  # bad form, but avoiding some
 except Exception as e:
     warnings.warn(str(e))  # avoiding https://github.com/scikit-learn/scikit-learn/issues/14485
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import backend as K
+import keras
+from keras import backend as K
+from keras import layers as KL
+from keras.utils import plot_model
 from tqdm import tqdm as tqdm
-from tensorflow.keras import layers as KL
-from tensorflow.keras.utils import plot_model
 import matplotlib.pyplot as plt
 
 # project imports
@@ -90,42 +89,11 @@ def extract_z_dec(model, sample_layer_name, vis=False, wt_chk=False):
     return z_dec_model
 
 
-def z_effect(model, gen, z_layer_name, nb_samples=100, do_plot=False, tqdm=tqdm):
-    """
-    compute the effect of each z dimension on the final outcome via derivatives
-    we attempt this by taking gradients as in
-    https://stackoverflow.com/questions/39561560/getting-gradient-of-model-output-w-r-t-weights-using-keras
-
-    e.g. layer name: 'img-img-dense-vae_ae_dense_sample'
-    """
-
-    outputTensor = model.outputs[0]
-    inner = model.get_layer(z_layer_name).get_output_at(1)
-
-    # compute gradients
-    gradients = K.gradients(outputTensor, inner)
-    assert len(gradients) == 1, "wrong gradients"
-
-    # would be nice to be able to do this with K.eval() as opposed to explicit tensorflow sessions.
-    with tf.Session() as sess:
-        sess.run(tf.initialize_all_variables())
-
-        evaluated_gradients = [None] * nb_samples
-        for i in tqdm(range(nb_samples)):
-            sample = next(gen)
-            fdct = {model.get_input_at(0): sample[0]}
-            evaluated_gradients[i] = sess.run(gradients, feed_dict=fdct)[0]
-
-    all_gradients = np.mean(np.abs(np.vstack(evaluated_gradients)), 0)
-
-    if do_plot:
-        plt.figure()
-        plt.plot(np.sort(all_gradients))
-        plt.xlabel('sorted z index')
-        plt.ylabel('mean(|grad|)')
-        plt.show()
-
-    return all_gradients
+def z_effect(*args, **kwargs):  # pylint: disable=unused-argument
+    raise NotImplementedError(
+        'z_effect relied on TensorFlow sessions for gradient evaluation and has not '
+        'been ported to the Keras 3 backend yet.'
+    )
 
 
 def sample_dec(z_dec_model,

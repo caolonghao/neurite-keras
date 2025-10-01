@@ -27,10 +27,9 @@ from tempfile import NamedTemporaryFile
 # third party imports
 import numpy as np
 from tqdm import tqdm_notebook as tqdm
-import tensorflow as tf
-from tensorflow import keras
-import tensorflow.keras.backend as K
-import tensorflow.keras.utils
+import keras
+from keras import backend as K
+from keras import utils as keras_utils
 
 
 def stack_models(models, connecting_node_ids=None):
@@ -201,7 +200,7 @@ def mod_submodel(orig_model,
     #   computed below or passed in
     if input_layers is None:  # if none provided, search for them
         # InputLayerClass = keras.engine.topology.InputLayer
-        InputLayerClass = type(tf.keras.layers.InputLayer())
+        InputLayerClass = type(keras.layers.InputLayer())
         input_layers = [f for f in orig_model.layers if isinstance(f, InputLayerClass)]
 
     else:
@@ -323,7 +322,7 @@ def robust_multi_gpu(model, gpus, verbose=True):
 
 def diagram(model):
     outfile = NamedTemporaryFile().name + '.png'
-    tf.keras.utils.plot_model(model, to_file=outfile, show_shapes=True)
+    keras_utils.plot_model(model, to_file=outfile, show_shapes=True)
 
     from IPython.display import Image
     Image(outfile, width=100)

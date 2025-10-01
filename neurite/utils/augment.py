@@ -1,6 +1,7 @@
 import warnings
 import numpy as np
-import tensorflow as tf
+
+from .. import keras_backend as tf
 import neurite as ne
 
 

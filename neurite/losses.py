@@ -25,12 +25,12 @@ import sys
 
 # third party
 import numpy as np
-import tensorflow as tf
-import tensorflow.keras.backend as K
-from tensorflow.keras import losses
-# simple metrics renamed mae -> l1, mse -> l2
-from tensorflow.keras.losses import MAE as l1
-from tensorflow.keras.losses import MSE as l2
+from keras import backend as K
+from keras import losses
+from keras.losses import MAE as l1
+from keras.losses import MSE as l2
+
+from . import keras_backend as tf
 
 # local
 from . import utils

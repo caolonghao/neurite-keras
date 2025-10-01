@@ -26,9 +26,10 @@ import itertools
 import numpy as np
 from tqdm import tqdm_notebook as tqdm
 from pprint import pformat
-import tensorflow as tf
-from tensorflow import keras
-import tensorflow.keras.backend as K
+import keras
+from keras import backend as K
+
+from .. import keras_backend as tf
 
 # local imports
 import neurite as ne

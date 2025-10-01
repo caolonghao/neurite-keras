@@ -1,4 +1,4 @@
-import tensorflow as tf
+import keras
 import h5py
 import json
 import inspect
@@ -75,7 +75,7 @@ class ReferenceContainer:
         pass
 
 
-class LoadableModel(tf.keras.Model):
+class LoadableModel(keras.Model):
     """
     Base class for easy keras model loading without having to manually
     specify the architecture configuration at load time.

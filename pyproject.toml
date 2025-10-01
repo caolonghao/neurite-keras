@@ -25,7 +25,7 @@ maintainers = [
   { name = "Etienne Chollet", email = "etiennepchollet@gmail.com" }
 ]
 dependencies = [
-  "tensorflow",
+  "keras>=3.0.0",
   "einops",
   "pystrum",
   "nibabel",

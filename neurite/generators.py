@@ -29,8 +29,8 @@ import zipfile
 import numpy as np
 import nibabel as nib
 import scipy
-from tensorflow.python.keras.utils import np_utils
-from tensorflow.keras.models import Model
+from keras.models import Model
+from keras.utils import to_categorical
 
 # local packages
 import pystrum.pynd.ndutils as nd
@@ -964,7 +964,7 @@ def img_seg(volpath,
         input_vol = np.vstack([next(img_gen).astype('float16') / 255 for i in range(batch_size)])
         input_vol = np.expand_dims(input_vol, axis=-1)
 
-        output_vols = [np_utils.to_categorical(next(seg_gen).astype(
+        output_vols = [to_categorical(next(seg_gen).astype(
             'int8'), num_classes=2) for i in range(batch_size)]
         output_vol = np.vstack([np.expand_dims(f, axis=0) for f in output_vols])
 
