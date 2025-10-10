@@ -27,8 +27,8 @@ import sys
 import numpy as np
 from keras import backend as K
 from keras import losses
-from keras.losses import MAE as l1
-from keras.losses import MSE as l2
+l1 = getattr(losses, "MAE", losses.mean_absolute_error)
+l2 = getattr(losses, "MSE", losses.mean_squared_error)
 
 from . import keras_backend as tf
 

@@ -31,9 +31,41 @@ from keras import backend as K
 
 from .. import keras_backend as tf
 
+try:  # pragma: no cover - torch is optional when running on TF/JAX backends
+    import torch
+except Exception:  # pragma: no cover
+    torch = None
+
 # local imports
 import pystrum.pynd.ndutils as nd
 import neurite as ne
+
+
+def _canonical_dtype(dtype):
+    if dtype is None:
+        return None
+    if isinstance(dtype, str):
+        return dtype.split('.', 1)[-1]
+    name = getattr(dtype, 'name', None)
+    if isinstance(name, str) and name:
+        return name.split('.', 1)[-1]
+    text = str(dtype)
+    if text:
+        return text.split('.', 1)[-1]
+    return None
+
+
+def _dtype_is_floating(dtype) -> bool:
+    canon = _canonical_dtype(dtype)
+    if canon is None:
+        return False
+    canon = canon.lower()
+    if canon.startswith('float') or canon in {'bfloat16', 'half'}:
+        return True
+    try:
+        return np.issubdtype(np.dtype(canon), np.floating)
+    except Exception:  # pragma: no cover
+        return False
 
 
 def setup_device(gpuid=None):
@@ -110,21 +142,40 @@ def interpn(vol, loc, interp_method='linear', fill_value=None):
                         % (nb_dims, len(vol.shape)))
 
     if len(vol.shape) == nb_dims:
-        vol = K.expand_dims(vol, -1)
+        vol = tf.expand_dims(vol, -1)
 
     # flatten and float location Tensors
-    if not loc.dtype.is_floating:
-        target_loc_dtype = vol.dtype if vol.dtype.is_floating else 'float32'
+    loc_dtype = _canonical_dtype(getattr(loc, 'dtype', None))
+    vol_dtype = _canonical_dtype(getattr(vol, 'dtype', None))
+
+    if not _dtype_is_floating(loc_dtype):
+        target_loc_dtype = vol_dtype if _dtype_is_floating(vol_dtype) else 'float32'
         loc = tf.cast(loc, target_loc_dtype)
-    elif vol.dtype.is_floating and vol.dtype != loc.dtype:
-        loc = tf.cast(loc, vol.dtype)
+        loc_dtype = target_loc_dtype
+    elif _dtype_is_floating(vol_dtype) and loc_dtype != vol_dtype:
+        loc = tf.cast(loc, vol_dtype)
 
-    if isinstance(vol.shape, (tf.compat.v1.Dimension, tf.TensorShape)):
-        volshape = vol.shape.as_list()
-    else:
-        volshape = vol.shape
+    if vol_dtype is None and _dtype_is_floating(loc_dtype):
+        vol = tf.cast(vol, loc_dtype)
+        vol_dtype = loc_dtype
 
-    max_loc = [d - 1 for d in vol.get_shape().as_list()]
+    vol_shape = getattr(vol, 'shape', None)
+    if hasattr(vol_shape, 'as_list'):
+        vol_shape = vol_shape.as_list()
+    elif vol_shape is not None:
+        try:
+            vol_shape = list(vol_shape)
+        except TypeError:  # pragma: no cover
+            vol_shape = None
+
+    if vol_shape is None:
+        raise ValueError('interpn requires statically known volume shape.')
+
+    max_loc = []
+    for dim in vol_shape:
+        if dim is None:
+            raise ValueError('interpn requires fully-defined volume shape, found None dimension.')
+        max_loc.append(dim - 1)
 
     # interpolate
     if interp_method == 'linear':
@@ -166,8 +217,8 @@ def interpn(vol, loc, interp_method='linear', fill_value=None):
             # indices = tf.stack(subs, axis=-1)
             # vol_val = tf.gather_nd(vol, indices)
             # faster way to gather than gather_nd, because gather_nd needs tf.stack which is slow :(
-            idx = sub2ind2d(vol.shape[:-1], subs)
-            vol_reshape = tf.reshape(vol, [-1, volshape[-1]])
+            idx = sub2ind2d(vol_shape[:-1], subs)
+            vol_reshape = tf.reshape(vol, [-1, vol_shape[-1]])
             vol_val = tf.gather(vol_reshape, idx)
 
             # get the weight of this cube_pt based on the distance
@@ -178,10 +229,10 @@ def interpn(vol, loc, interp_method='linear', fill_value=None):
             # wlm = tf.stack(wts_lst, axis=0)
             # wt = tf.reduce_prod(wlm, axis=0)
             wt = prod_n(wts_lst)
-            wt = K.expand_dims(wt, -1)
+            wt = tf.expand_dims(wt, -1)
 
             # compute final weighted value for each cube corner
-            interp_vol += wt * vol_val
+            interp_vol = interp_vol + wt * vol_val
 
     else:
         assert interp_method == 'nearest', \
@@ -202,8 +253,8 @@ def interpn(vol, loc, interp_method='linear', fill_value=None):
         below = [tf.less(loc[..., d], 0) for d in range(nb_dims)]
         above = [tf.greater(loc[..., d], max_loc[d]) for d in range(nb_dims)]
         out_of_bounds = tf.reduce_any(tf.stack(below + above, axis=-1), axis=-1, keepdims=True)
-        interp_vol *= tf.cast(tf.logical_not(out_of_bounds), out_type)
-        interp_vol += tf.cast(out_of_bounds, out_type) * fill_value
+        interp_vol = interp_vol * tf.cast(tf.logical_not(out_of_bounds), out_type)
+        interp_vol = interp_vol + tf.cast(out_of_bounds, out_type) * fill_value
 
     # if only inputted volume without channels C, then return only that channel
     if len(input_vol_shape) == nb_dims:
@@ -447,14 +498,35 @@ def meshgrid(*args, **kwargs):
         output.append(tf.reshape(tf.stack(x), (s0[:i] + (-1,) + s0[i + 1::])))
     # Create parameters for broadcasting each tensor to the full size
     shapes = [tf.size(x) for x in args]
-    sz = [x.get_shape().as_list()[0] for x in args]
+
+    def _static_length(x):
+        shape = getattr(x, 'shape', None)
+        if shape is None or len(shape) == 0:
+            return None
+        dim0 = shape[0]
+        if isinstance(dim0, int):
+            return dim0
+        if hasattr(dim0, 'value') and dim0.value is not None:
+            return int(dim0.value)
+        try:
+            return int(dim0)
+        except Exception:  # pragma: no cover
+            return None
+
+    sz_tensors = []
+    for x in args:
+        length = _static_length(x)
+        if length is not None:
+            sz_tensors.append(tf.convert_to_tensor(length, dtype='int32'))
+        else:
+            sz_tensors.append(tf.cast(tf.shape(x)[0], 'int32'))
 
     # output_dtype = tf.convert_to_tensor(args[0]).dtype.base_dtype
     if indexing == "xy" and ndim > 1:
         output[0] = tf.reshape(output[0], (1, -1) + (1,) * (ndim - 2))
         output[1] = tf.reshape(output[1], (-1, 1) + (1,) * (ndim - 2))
         shapes[0], shapes[1] = shapes[1], shapes[0]
-        sz[0], sz[1] = sz[1], sz[0]
+        sz_tensors[0], sz_tensors[1] = sz_tensors[1], sz_tensors[0]
 
     # This is the part of the implementation from tf that is slow.
     # We replace it below to get a ~6x speedup (essentially using tile instead of * tf.ones())
@@ -462,7 +534,9 @@ def meshgrid(*args, **kwargs):
     # mult_fact = tf.ones(shapes, output_dtype)
     # return [x * mult_fact for x in output]
     for i in range(len(output)):
-        stack_sz = [*sz[:i], 1, *sz[(i + 1):]]
+        stack_sz = []
+        for j, value in enumerate(sz_tensors):
+            stack_sz.append(tf.convert_to_tensor(1, dtype='int32') if j == i else value)
         if indexing == 'xy' and ndim > 1 and i < 2:
             stack_sz[0], stack_sz[1] = stack_sz[1], stack_sz[0]
         output[i] = tf.tile(output[i], tf.stack(stack_sz))
@@ -1089,7 +1163,7 @@ def prod_n(lst):
     """
     prod = lst[0]
     for p in lst[1:]:
-        prod *= p
+        prod = prod * p
     return prod
 
 
