@@ -442,105 +442,16 @@ def ndgrid(*args, **kwargs):
 def meshgrid(*args, **kwargs):
     """
 
-    meshgrid code that builds on (copies) tensorflow's meshgrid but dramatically
-    improves runtime by changing the last step to tiling instead of multiplication.
-    https://github.com/tensorflow/tensorflow/blob/c19e29306ce1777456b2dbb3a14f511edf7883a8/tensorflow/python/ops/array_ops.py#L1921
-
-    Broadcasts parameters for evaluation on an N-D grid.
-    Given N one-dimensional coordinate arrays `*args`, returns a list `outputs`
-    of N-D coordinate arrays for evaluating expressions on an N-D grid.
-    Notes:
-    `meshgrid` supports cartesian ('xy') and matrix ('ij') indexing conventions.
-    When the `indexing` argument is set to 'xy' (the default), the broadcasting
-    instructions for the first two dimensions are swapped.
-    Examples:
-    Calling `X, Y = meshgrid(x, y)` with the tensors
-    ```python
-    x = [1, 2, 3]
-    y = [4, 5, 6]
-    X, Y = meshgrid(x, y)
-    # X = [[1, 2, 3],
-    #      [1, 2, 3],
-    #      [1, 2, 3]]
-    # Y = [[4, 4, 4],
-    #      [5, 5, 5],
-    #      [6, 6, 6]]
-    ```
-    Args:
-    *args: `Tensor`s with rank 1.
-    **kwargs:
-      - indexing: Either 'xy' or 'ij' (optional, default: 'xy').
-      - name: A name for the operation (optional).
-    Returns:
-    outputs: A list of N `Tensor`s with rank N.
-    Raises:
-    TypeError: When no keyword arguments (kwargs) are passed.
-    ValueError: When indexing keyword argument is not one of `xy` or `ij`.
+    Broadcasts parameters for evaluation on an N-D grid using the backend meshgrid.
     """
 
     indexing = kwargs.pop("indexing", "xy")
-    # name = kwargs.pop("name", "meshgrid")
     if kwargs:
         key = list(kwargs.keys())[0]
-        raise TypeError("'{}' is an invalid keyword argument "
-                        "for this function".format(key))
-
+        raise TypeError(f"'{key}' is an invalid keyword argument for this function")
     if indexing not in ("xy", "ij"):
         raise ValueError("indexing parameter must be either 'xy' or 'ij'")
-
-    # with ops.name_scope(name, "meshgrid", args) as name:
-    ndim = len(args)
-    s0 = (1,) * ndim
-
-    # Prepare reshape by inserting dimensions with size 1 where needed
-    output = []
-    for i, x in enumerate(args):
-        output.append(tf.reshape(tf.stack(x), (s0[:i] + (-1,) + s0[i + 1::])))
-    # Create parameters for broadcasting each tensor to the full size
-    shapes = [tf.size(x) for x in args]
-
-    def _static_length(x):
-        shape = getattr(x, 'shape', None)
-        if shape is None or len(shape) == 0:
-            return None
-        dim0 = shape[0]
-        if isinstance(dim0, int):
-            return dim0
-        if hasattr(dim0, 'value') and dim0.value is not None:
-            return int(dim0.value)
-        try:
-            return int(dim0)
-        except Exception:  # pragma: no cover
-            return None
-
-    sz_tensors = []
-    for x in args:
-        length = _static_length(x)
-        if length is not None:
-            sz_tensors.append(tf.convert_to_tensor(length, dtype='int32'))
-        else:
-            sz_tensors.append(tf.cast(tf.shape(x)[0], 'int32'))
-
-    # output_dtype = tf.convert_to_tensor(args[0]).dtype.base_dtype
-    if indexing == "xy" and ndim > 1:
-        output[0] = tf.reshape(output[0], (1, -1) + (1,) * (ndim - 2))
-        output[1] = tf.reshape(output[1], (-1, 1) + (1,) * (ndim - 2))
-        shapes[0], shapes[1] = shapes[1], shapes[0]
-        sz_tensors[0], sz_tensors[1] = sz_tensors[1], sz_tensors[0]
-
-    # This is the part of the implementation from tf that is slow.
-    # We replace it below to get a ~6x speedup (essentially using tile instead of * tf.ones())
-    # TODO(nolivia): improve performance with a broadcast
-    # mult_fact = tf.ones(shapes, output_dtype)
-    # return [x * mult_fact for x in output]
-    for i in range(len(output)):
-        stack_sz = []
-        for j, value in enumerate(sz_tensors):
-            stack_sz.append(tf.convert_to_tensor(1, dtype='int32') if j == i else value)
-        if indexing == 'xy' and ndim > 1 and i < 2:
-            stack_sz[0], stack_sz[1] = stack_sz[1], stack_sz[0]
-        output[i] = tf.tile(output[i], tf.stack(stack_sz))
-    return output
+    return tf.meshgrid(*args, indexing=indexing)
 
 
 def flatten(v):
