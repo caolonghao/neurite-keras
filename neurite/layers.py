@@ -35,6 +35,11 @@ from keras import initializers as KInitializers
 from keras import regularizers as KRegularizers
 from keras.layers import Layer, InputLayer, Input, InputSpec
 
+try:  # pragma: no cover - optional for non-Torch backends
+    import torch
+except Exception:  # pragma: no cover
+    torch = None
+
 from . import keras_backend as tf
 
 # local imports
@@ -1295,27 +1300,86 @@ class LocalCrossLinearTrf(Layer):
 
 
 class LocalParamLayer(Layer):
-    """Placeholder for TensorFlow-dependent LocalParamLayer."""
+    """Trainable tensor that is independent of the computation graph inputs."""
 
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(
-            'LocalParamLayer depended on TensorFlow internals and is not yet ported.'
+    def __init__(
+        self,
+        shape,
+        initializer='zeros',
+        mult=1.0,
+        regularizer=None,
+        constraint=None,
+        **kwargs,
+    ):
+        self.param_shape = tuple(int(dim) for dim in shape)
+        self.mult = mult
+        self.initializer = KInitializers.get(initializer)
+        self.regularizer = KRegularizers.get(regularizer) if regularizer is not None else None
+        self.constraint = KConstraints.get(constraint) if constraint is not None else None
+        super().__init__(**kwargs)
+
+    def build(self, _input_shape):
+        self._param = self.add_weight(
+            name='local_param',
+            shape=self.param_shape,
+            initializer=self.initializer,
+            regularizer=self.regularizer,
+            constraint=self.constraint,
+            trainable=True,
         )
+        super().build(_input_shape)
+
+    def call(self, inputs=None):
+        del inputs  # parameter has no dependency on inputs
+        return self._param * self.mult
+
+    def compute_output_shape(self, _):
+        return tuple(self.param_shape)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'shape': self.param_shape,
+            'initializer': KInitializers.serialize(self.initializer),
+            'mult': self.mult,
+            'regularizer': KRegularizers.serialize(self.regularizer),
+            'constraint': KConstraints.serialize(self.constraint),
+        })
+        return config
 
 
-class LocalParamWithInput(Layer):
-    """Placeholder for TensorFlow-dependent LocalParamWithInput."""
+class LocalParamWithInput(LocalParamLayer):
+    """Trainable tensor that matches the batch size of the incoming tensor."""
 
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(
-            'LocalParamWithInput depended on TensorFlow internals and is not yet ported.'
+    def call(self, inputs):
+        param = super().call(inputs=None)
+
+        if inputs is None:
+            return tf.expand_dims(param, axis=0)
+
+        if torch is not None and isinstance(inputs, torch.Tensor):
+            if isinstance(param, torch.Tensor):
+                return param.unsqueeze(0).expand(inputs.shape[0], *param.shape)
+
+        batch = tf.shape(inputs)[0]
+        param = tf.expand_dims(param, axis=0)
+        multiples = tf.concat(
+            (tf.expand_dims(batch, axis=0), tf.ones((len(self.param_shape),), dtype='int32')),
+            axis=0,
         )
+        return tf.tile(param, multiples)
+
+    def compute_output_shape(self, input_shape):
+        if hasattr(input_shape, 'as_list'):
+            input_shape = input_shape.as_list()
+        batch_dim = input_shape[0] if isinstance(input_shape, (tuple, list)) else input_shape
+        return (batch_dim, *self.param_shape)
 
 
-def LocalParam(*_args, **_kwargs):  # pylint: disable=invalid-name
-    raise NotImplementedError(
-        'LocalParam depended on TensorFlow internals and is not yet ported.'
-    )
+def LocalParam(*args, **kwargs):  # pylint: disable=invalid-name
+    """Functional alias maintained for backward compatibility."""
+
+    return LocalParamLayer(*args, **kwargs)
 
 
 ##########################################
@@ -1361,26 +1425,32 @@ class MeanStream(Layer):
     def call(self, x, training=None):
         training = _get_training_value(training, self.trainable)
 
-        # get batch shape:
-        this_bs_int = K.shape(x)[0]
-
-        # prep for broadcasting :(
-        p = tf.concat((K.reshape(this_bs_int, (1,)), K.shape(self.mean)), 0)
-        z = tf.ones(p)
-
-        # If calling in inference mode, use moving stats
+        # mean 形状: [160, 160, 192, 3]
+        # x 形状: [batch_size, 160, 160, 192, 3]
+        
+        # 扩展维度后自动广播
+        mean_expanded = tf.expand_dims(self.mean, axis=0)  # [1, 160, 160, 192, 3]
+        
+        cap_tensor = tf.cast(self.cap, self.count.dtype)
+        
         if training is False:
-            return K.minimum(1., self.count / self.cap) * (z * K.expand_dims(self.mean, 0))
+            scale_tensor = tf.minimum(tf.convert_to_tensor(1.0, dtype=self.count.dtype), 
+                                    self.count / cap_tensor)
+            scale = tf.cast(scale_tensor[0], self.mean.dtype)
+            # 直接相乘，会自动广播到 [batch_size, 160, 160, 192, 3]
+            return scale * mean_expanded
 
-        # get new mean and count
         new_mean, new_count = _mean_update(self.mean, self.count, x, self.cap)
 
-        # update op
         self.count.assign(new_count)
         self.mean.assign(new_mean)
 
-        # the first few 1000 should not matter that much towards this cost
-        return K.minimum(1., new_count / self.cap) * (z * K.expand_dims(new_mean, 0))
+        new_mean_expanded = tf.expand_dims(new_mean, axis=0)
+        scale_tensor = tf.minimum(tf.convert_to_tensor(1.0, dtype=new_count.dtype), 
+                                new_count / cap_tensor)
+        scale = tf.cast(scale_tensor[0], self.mean.dtype)
+        # 直接相乘，会自动广播
+        return scale * new_mean_expanded
 
     def compute_output_shape(self, input_shape):
         return input_shape
@@ -1424,43 +1494,44 @@ class CovStream(Layer):
 
     def call(self, x, training=None):
         training = _get_training_value(training, self.trainable)
-
         # get batch shape:
-        this_bs_int = K.shape(x)[0]
-
-        # prep for broadcasting :(
-        p = tf.concat((K.reshape(this_bs_int, (1,)), K.shape(self.cov)), 0)
-        z = tf.ones(p)
-
+        batch_size = tf.shape(x)[0]
+        broadcast_shape = tf.concat((tf.reshape(batch_size, (1,)), tf.shape(self.cov)), axis=0)
+        cap_tensor = tf.cast(self.cap, self.count.dtype)
         # If calling in inference mode, use moving stats
         if training is False:
-            return K.minimum(1., self.count / self.cap) * (z * K.expand_dims(self.cov, 0))
-
+            cov_broadcast = tf.broadcast_to(tf.expand_dims(self.cov, axis=0), broadcast_shape.shape)
+            scale_tensor = tf.minimum(tf.constant(1.0, dtype=self.count.dtype), self.count / cap_tensor)
+            scale = tf.cast(scale_tensor[0], self.cov.dtype)
+            return scale * cov_broadcast
+        
         x_orig = x
+
 
         # update mean
         new_mean, new_count = _mean_update(self.mean, self.count, x, self.cap)
 
         # x reshape
-        this_bs = tf.cast(this_bs_int, 'float32')  # this batch size
-        prev_count = self.count
-        x = K.batch_flatten(x)  # B x N
-
+        this_bs = tf.cast(batch_size, self.count.dtype)
+        prev_count = tf.identity(self.count)
+        x = tf.reshape(x, (batch_size, -1))  # B x N
         # new C update. Should be B x N x N
-        x = K.expand_dims(x, -1)
-        C_delta = K.batch_dot(x, K.permute_dimensions(x, [0, 2, 1]))
-
+        x = tf.expand_dims(x, axis=-1)
+        C_delta = tf.matmul(x, tf.transpose(x, perm=[0, 2, 1]))
         # update cov
-        prev_cap = K.minimum(prev_count, self.cap)
-        C = self.cov * (prev_cap - 1) + K.sum(C_delta, 0)
-        new_cov = C / (prev_cap + this_bs - 1)
-
+        prev_cap = tf.minimum(prev_count, tf.cast(self.cap, prev_count.dtype))
+        prev_cap_scalar = tf.cast(prev_cap[0], self.cov.dtype)
+        this_bs_scalar = tf.cast(this_bs, self.cov.dtype)
+        C = self.cov * (prev_cap_scalar - tf.constant(1.0, dtype=self.cov.dtype)) + tf.reduce_sum(C_delta, axis=0)
+        new_cov = C / (prev_cap_scalar + this_bs_scalar - tf.constant(1.0, dtype=self.cov.dtype))
         # updates
         self.count.assign(new_count)
         self.mean.assign(new_mean)
         self.cov.assign(new_cov)
-
-        return K.minimum(1., new_count / self.cap) * (z * K.expand_dims(new_cov, 0))
+        cov_broadcast = tf.broadcast_to(tf.expand_dims(new_cov, axis=0), broadcast_shape.shape)
+        scale_tensor = tf.minimum(tf.constant(1.0, dtype=new_count.dtype), new_count / cap_tensor)
+        scale = tf.cast(scale_tensor[0], self.cov.dtype)
+        return scale * cov_broadcast
 
     def compute_output_shape(self, input_shape):
         v = np.prod(input_shape[1:])
@@ -1470,17 +1541,20 @@ class CovStream(Layer):
 def _mean_update(pre_mean, pre_count, x, pre_cap=None):
 
     # compute this batch stats
-    this_sum = tf.reduce_sum(x, 0)
-    this_bs = tf.cast(K.shape(x)[0], 'float32')  # this batch size
-
+    this_sum = tf.reduce_sum(x, axis=0)
+    this_bs = tf.cast(tf.shape(x)[0], pre_count.dtype)
     # increase count and compute weights
     new_count = pre_count + this_bs
-    alpha = this_bs / K.minimum(new_count, pre_cap)
-
+    if pre_cap is None:
+        cap_tensor = new_count
+    else:
+        cap_tensor = tf.cast(pre_cap, pre_count.dtype)
+    alpha = this_bs / tf.minimum(new_count, cap_tensor)
     # compute new mean. Note that once we reach self.cap (e.g. 1000),
     # the 'previous mean' matters less
-    new_mean = pre_mean * (1 - alpha) + (this_sum / this_bs) * alpha
-
+    alpha_cast = tf.cast(alpha, pre_mean.dtype)
+    batch_mean = tf.cast(this_sum, pre_mean.dtype) / tf.cast(this_bs, pre_mean.dtype)
+    new_mean = pre_mean * (tf.constant(1.0, dtype=pre_mean.dtype) - alpha_cast) + batch_mean * alpha_cast
     return (new_mean, new_count)
 
 
@@ -1961,7 +2035,7 @@ class Constant(Layer):
         """
         batch = tf.maximum(tf.shape(x)[0], 1)
         shape = tf.concat(([batch], tf.shape(self.const)), axis=0)
-        return tf.broadcast_to(self.const, shape)
+        return tf.broadcast_to(self.const, shape.shape)
 
 
 ##########################################
